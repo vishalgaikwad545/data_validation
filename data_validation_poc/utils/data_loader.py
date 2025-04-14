@@ -1,83 +1,86 @@
 """
-Functions to load data from Excel and Parquet files into SQLite database
+Utility functions for loading data from various sources
 """
-import os
-import sqlite3
 import pandas as pd
-from typing import Dict, List, Tuple, Any
-import uuid
+import sqlite3
+from typing import Dict, Any
+import os
 
 def load_excel(file_path: str) -> Dict[str, pd.DataFrame]:
     """
-    Load Excel file and return a dictionary of dataframes for each sheet
+    Load Excel file with multiple sheets
+    
+    Args:
+        file_path: Path to the Excel file
+        
+    Returns:
+        Dictionary mapping sheet names to DataFrames
     """
-    excel_data = pd.read_excel(file_path, sheet_name=None)
+    # Check if file exists
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Excel file not found: {file_path}")
+    
+    # Load all sheets from Excel file
+    excel_data = {}
+    xlsx = pd.ExcelFile(file_path)
+    
+    for sheet_name in xlsx.sheet_names:
+        excel_data[sheet_name] = pd.read_excel(xlsx, sheet_name=sheet_name)
+        
     return excel_data
 
 def load_parquet(file_path: str) -> pd.DataFrame:
     """
-    Load Parquet file and return a dataframe
+    Load Parquet file into a DataFrame
+    
+    Args:
+        file_path: Path to the Parquet file
+        
+    Returns:
+        DataFrame containing Parquet data
     """
+    # Check if file exists
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Parquet file not found: {file_path}")
+    
+    # Load Parquet file
     return pd.read_parquet(file_path)
 
-def load_parquets_to_sqlite(parquet_files: List[str], db_path: str) -> List[str]:
+def create_sqlite_db(df: pd.DataFrame, connection: sqlite3.Connection, table_name: str) -> None:
     """
-    Load multiple Parquet files into SQLite database
-    Returns a list of created table names
-    """
-    conn = sqlite3.connect(db_path)
-    table_names = []
+    Create a SQLite table from a DataFrame
     
-    for file_path in parquet_files:
-        # Generate a unique table name based on file name
-        base_name = os.path.basename(file_path).replace('.parquet', '')
-        table_name = f"{base_name}_{uuid.uuid4().hex[:8]}"
+    Args:
+        df: DataFrame to load into SQLite
+        connection: SQLite connection object
+        table_name: Name of the table to create
         
-        # Load parquet to dataframe
-        df = load_parquet(file_path)
-        
-        # Write to SQLite
-        df.to_sql(table_name, conn, if_exists='replace', index=False)
-        table_names.append(table_name)
-    
-    conn.close()
-    return table_names
-
-def get_db_schema(db_path: str) -> Dict[str, List[str]]:
+    Returns:
+        None
     """
-    Get schema information from SQLite database
-    Returns a dictionary of table names and their columns
-    """
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
+    # Check if DataFrame is empty
+    if df.empty:
+        raise ValueError("DataFrame is empty")
     
-    # Get all tables
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-    tables = cursor.fetchall()
+    # Convert DataFrame to SQLite table
+    df.to_sql(table_name, connection, if_exists='replace', index=False)
     
-    schema = {}
-    for table in tables:
-        table_name = table[0]
-        cursor.execute(f"PRAGMA table_info({table_name});")
-        columns = cursor.fetchall()
-        schema[table_name] = [col[1] for col in columns]  # col[1] is column name
+    # Optimize table with indexes for common queries
+    cursor = connection.cursor()
     
-    conn.close()
-    return schema
-
-def get_table_data(db_path: str, table_name: str, limit: int = 5) -> Tuple[List[str], List[List[Any]]]:
-    """
-    Get data from a specific table in the SQLite database
-    Returns column names and rows
-    """
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
+    # Create indexes on columns that might be frequently queried
+    # This is a heuristic approach - specific indexes depend on query patterns
+    columns = df.columns.tolist()
     
-    cursor.execute(f"PRAGMA table_info({table_name});")
-    columns = [col[1] for col in cursor.fetchall()]
+    # Create indexes on columns that might contain codes or IDs
+    id_like_columns = [col for col in columns if 'id' in col.lower() or 'code' in col.lower() or 'key' in col.lower()]
+    for col in id_like_columns:
+        try:
+            # Create index with a unique name based on table and column
+            index_name = f"idx_{table_name}_{col}".replace(" ", "_").lower()
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name} ({col})")
+        except Exception as e:
+            print(f"Warning: Could not create index on {col}: {str(e)}")
     
-    cursor.execute(f"SELECT * FROM {table_name} LIMIT {limit};")
-    rows = cursor.fetchall()
-    
-    conn.close()
-    return columns, rows
+    # Commit changes
+    connection.commit()
