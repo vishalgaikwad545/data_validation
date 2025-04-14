@@ -1,110 +1,123 @@
 """
-Agent for validating codes based on the codes sheet from Excel
+Code validation agent for data validation workflow
 """
-from typing import Dict, List, Any, Callable
 import pandas as pd
-from langchain.chains import LLMChain
-from langchain.schema import HumanMessage, SystemMessage
-from langchain.prompts import PromptTemplate
-from langchain.tools import BaseTool
-from pydantic import BaseModel, Field
+from typing import Dict, List, Any
+import sqlite3
+import os
 
-import config
-from utils.sql_helpers import check_column_exists, get_matching_rows
-
-class CodeValidator:
+class CodeValidationAgent:
     """
-    Agent that validates codes based on the codes sheet from Excel
+    Agent responsible for validating codes in the data
     """
-    def __init__(self, llm):
-        """
-        Initialize the code validator agent
-        """
-        self.llm = llm
-        
-        # Define the system prompt for the SQL generation
-        self.system_prompt = """
-        You are an expert SQL analyst helping with data validation.
-        You need to create SQL queries to find matching records between Excel data and the SQLite database.
-        
-        The Excel 'codes' sheet contains codes and IDs that need to be validated against the database.
-        Your goal is to generate SQL queries to find records in the database tables that match the values in the Excel sheet.
-        
-        Only generate the SQL query without any additional explanations.
-        """
-        
-        # Create a prompt template for generating SQL queries
-        self.sql_template = PromptTemplate(
-            input_variables=["table_name", "column_name", "excel_values"],
-            template="""
-            I need to find records in the SQLite database table '{table_name}' where the column '{column_name}' 
-            matches any of the following values from the Excel sheet:
-            
-            {excel_values}
-            
-            Please generate a SQL query to retrieve these matching records.
-            """
-        )
-        
-        # Create an LLM chain for generating SQL queries
-        self.sql_chain = LLMChain(
-            llm=self.llm,
-            prompt=self.sql_template
-        )
     
-    def validate(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    def __init__(self, excel_data: Dict[str, pd.DataFrame]):
         """
-        Validate codes based on the codes sheet from Excel
+        Initialize the Code Validation Agent
+        
+        Args:
+            excel_data: Dictionary of DataFrames from the Excel file
         """
-        # Get the codes sheet from Excel
-        codes_df = state["excel_data"].get("codes")
+        self.excel_data = excel_data
+        self.valid_codes = self._extract_valid_codes()
         
-        # Check if codes sheet exists
-        if codes_df is None:
-            state["status"] = "error"
-            state["code_validation_results"] = [{
-                "error": "No 'codes' sheet found in the Excel file."
-            }]
-            return state
+    def _extract_valid_codes(self) -> Dict[str, List[str]]:
+        """
+        Extract valid codes from the Excel data
         
-        validation_results = []
-        
-        # For each column in the codes sheet
-        for column in codes_df.columns:
-            # Get unique values from the column
-            values = codes_df[column].dropna().unique().tolist()
+        Returns:
+            Dictionary mapping code types to lists of valid codes
+        """
+        # Check if code_reference sheet exists
+        if 'code_reference' in self.excel_data:
+            code_df = self.excel_data['code_reference']
             
-            # Check if any Parquet table has a column with the same name
-            matching_tables = []
-            for table_name in state["parquet_tables"]:
-                if column.lower() in [col.lower() for col in state["db_schema"][table_name]]:
-                    matching_tables.append(table_name)
-            
-            if matching_tables:
-                # For each matching table, validate the values
-                for table_name in matching_tables:
-                    # Get matching rows
-                    matching_df = get_matching_rows(
-                        state["db_path"], 
-                        table_name, 
-                        column, 
-                        values
-                    )
+            # Convert to dictionary of valid codes by type
+            valid_codes = {}
+            for _, row in code_df.iterrows():
+                if 'code_type' in row and 'valid_code' in row:
+                    code_type = str(row['code_type']).strip()
+                    valid_code = str(row['valid_code']).strip()
                     
-                    # Add to results
-                    if not matching_df.empty:
-                        matching_values = matching_df[column].tolist()
+                    if code_type not in valid_codes:
+                        valid_codes[code_type] = []
+                    
+                    valid_codes[code_type].append(valid_code)
+                    
+            return valid_codes
+        return {}
+        
+    def validate_codes(self, db_connection: sqlite3.Connection, table_name: str) -> List[Dict[str, Any]]:
+        """
+        Validates codes in the data against reference codes
+        
+        Args:
+            db_connection: SQLite connection to the database
+            table_name: Name of the table to validate
+        
+        Returns:
+            List of validation results
+        """
+        results = []
+        
+        # Skip if no valid codes to check against
+        if not self.valid_codes:
+            return results
+            
+        # Get table columns
+        try:
+            cursor = db_connection.cursor()
+            cursor.execute(f"PRAGMA table_info({table_name})")
+            columns = [col[1] for col in cursor.fetchall()]
+            
+            # For each code type
+            for code_type, valid_codes in self.valid_codes.items():
+                # Find columns that might contain this code type
+                possible_columns = [col for col in columns if code_type.lower() in col.lower()]
+                
+                # For each possible column
+                for column in possible_columns:
+                    # Check for invalid codes
+                    placeholders = ','.join(['?' for _ in valid_codes])
+                    query = f"""
+                    SELECT DISTINCT {column} 
+                    FROM {table_name} 
+                    WHERE {column} IS NOT NULL 
+                    AND {column} NOT IN ({placeholders})
+                    LIMIT 100
+                    """
+                    
+                    cursor.execute(query, valid_codes)
+                    invalid_codes = [str(row[0]) for row in cursor.fetchall()]
+                    
+                    if invalid_codes:
+                        # Get sample records for each invalid code
+                        matching_records = []
+                        for invalid_code in invalid_codes[:5]:  # Limit to first 5 for performance
+                            sample_query = f"""
+                            SELECT * FROM {table_name} 
+                            WHERE {column} = ?
+                            LIMIT 2
+                            """
+                            
+                            cursor.execute(sample_query, (invalid_code,))
+                            column_names = [description[0] for description in cursor.description]
+                            records = cursor.fetchall()
+                            record_dicts = [dict(zip(column_names, record)) for record in records]
+                            matching_records.extend(record_dicts)
+                            
+                        # Create validation result
                         result = {
-                            "column": column,
                             "table": table_name,
-                            "matching_values": matching_values,
-                            "matching_records": matching_df.to_dict('records'),
-                            "validation_type": "code"
+                            "column": column,
+                            "code_type": code_type,
+                            "matching_values": invalid_codes,
+                            "matching_records": matching_records,
+                            "valid_values": valid_codes
                         }
-                        validation_results.append(result)
-        
-        # Update the state
-        state["code_validation_results"] = validation_results
-        state["status"] = "code_validation_completed"
-        
-        return state
+                        results.append(result)
+                        
+        except Exception as e:
+            print(f"Error in code validation: {str(e)}")
+            
+        return results
