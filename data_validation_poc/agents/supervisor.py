@@ -1,99 +1,98 @@
 """
 Supervisor agent that coordinates the validation workflow
 """
-from typing import Dict, List, Any, TypedDict
 import os
-from langchain_groq import ChatGroq
-from langchain.schema import HumanMessage, SystemMessage
-from langgraph.graph import StateGraph, START, END
-from langgraph.prebuilt import ToolNode
-from pydantic import BaseModel, Field
+import sqlite3
+import pandas as pd
+from typing import Dict, List, Any
+import tempfile
 
-import config
-from utils.data_loader import load_excel, load_parquets_to_sqlite, get_db_schema
-from agents.code_validator import CodeValidator
-from agents.zipcode_validator import ZipcodeValidator
+# Import local modules
+from agents.code_validator import CodeValidationAgent
+from agents.zipcode_validator import ZipcodeValidationAgent
 from agents.reporting import ReportingAgent
+from utils.data_loader import load_excel, load_parquet, create_sqlite_db
 
-# Define the state for the graph
-class ValidationState(TypedDict):
-    excel_data: Dict[str, Any]
-    parquet_tables: List[str]
-    db_schema: Dict[str, List[str]]
-    db_path: str
-    status: str
-    code_validation_results: List[Dict[str, Any]]
-    zipcode_validation_results: List[Dict[str, Any]]
-    final_report: List[Dict[str, Any]]
-
-def create_validation_graph():
-    """
-    Create the validation workflow graph
-    """
-    # Initialize the LLM
-    llm = ChatGroq(
-        api_key=config.GROQ_API_KEY,
-        model=config.LLM_MODEL
-    )
-    
-    # Create the validation agents
-    code_validator = CodeValidator(llm=llm)
-    zipcode_validator = ZipcodeValidator(llm=llm)
-    reporting_agent = ReportingAgent(llm=llm)
-    
-    # Create the graph
-    workflow = StateGraph(ValidationState)
-    
-    # Add nodes to the graph
-    workflow.add_node("code_validation", code_validator.validate)
-    workflow.add_node("zipcode_validation", zipcode_validator.validate)
-    workflow.add_node("generate_report", reporting_agent.generate_report)
-    
-    # Define the edges - IMPORTANT: Add an edge from START
-    workflow.add_edge(START, "code_validation")
-    workflow.add_edge("code_validation", "zipcode_validation")
-    workflow.add_edge("zipcode_validation", "generate_report")
-    workflow.add_edge("generate_report", END)
-    
-    # Compile the graph
-    return workflow.compile()
-
-def initialize_validation(excel_file_path: str, parquet_file_paths: List[str]) -> ValidationState:
-    """
-    Initialize the validation workflow
-    """
-    # Load the Excel data
-    excel_data = load_excel(excel_file_path)
-    
-    # Load the Parquet files into SQLite
-    parquet_tables = load_parquets_to_sqlite(parquet_file_paths, config.DB_PATH)
-    
-    # Get the database schema
-    db_schema = get_db_schema(config.DB_PATH)
-    
-    # Initialize the validation state
-    return ValidationState(
-        excel_data=excel_data,
-        parquet_tables=parquet_tables,
-        db_schema=db_schema,
-        db_path=config.DB_PATH,
-        status="initialized",
-        code_validation_results=[],
-        zipcode_validation_results=[],
-        final_report=[]
-    )
-
-def run_validation_workflow(excel_file_path: str, parquet_file_paths: List[str]) -> ValidationState:
+def run_validation_workflow(excel_file_path: str, parquet_file_paths: List[str]) -> Dict[str, Any]:
     """
     Run the validation workflow
+    
+    Args:
+        excel_file_path: Path to the Excel file with validation rules
+        parquet_file_paths: List of paths to Parquet files to validate
+    
+    Returns:
+        Dictionary containing validation results and status
     """
-    # Initialize the validation state
-    state = initialize_validation(excel_file_path, parquet_file_paths)
-    
-    # Create the validation graph
-    validation_graph = create_validation_graph()
-    
-    # Execute the graph
-    result = validation_graph.invoke(state)
-    
-    return result
+    try:
+        # Load Excel data
+        excel_data = load_excel(excel_file_path)
+        
+        # Set up SQLite database for Parquet data
+        db_path = os.path.join(tempfile.gettempdir(), "validation_data.db")
+        
+        # Create connection
+        connection = sqlite3.connect(db_path)
+        
+        # Create tables for each Parquet file
+        table_info = {}
+        for parquet_path in parquet_file_paths:
+            # Extract filename without extension
+            file_name = os.path.basename(parquet_path)
+            table_name = os.path.splitext(file_name)[0]
+            table_name = table_name.replace("-", "_").replace(" ", "_").lower()
+            
+            # Load Parquet to SQLite
+            parquet_data = load_parquet(parquet_path)
+            create_sqlite_db(parquet_data, connection, table_name)
+            
+            # Store info
+            table_info[table_name] = {
+                "path": parquet_path,
+                "name": table_name
+            }
+        
+        # Initialize validators
+        code_validator = CodeValidationAgent(excel_data)
+        zipcode_validator = ZipcodeValidationAgent(excel_data)
+        
+        # Run validators on each table
+        code_validation_results = []
+        zipcode_validation_results = []
+        
+        for table_name in table_info.keys():
+            # Run code validation
+            code_results = code_validator.validate_codes(connection, table_name)
+            code_validation_results.extend(code_results)
+            
+            # Run zipcode validation
+            zipcode_results = zipcode_validator.validate_zipcodes(connection, table_name)
+            zipcode_validation_results.extend(zipcode_results)
+        
+        # Generate report
+        reporting_agent = ReportingAgent()
+        final_report = reporting_agent.generate_report(code_validation_results, zipcode_validation_results)
+        report_summary = reporting_agent.generate_summary(code_validation_results, zipcode_validation_results)
+        
+        # Close connection
+        connection.close()
+        
+        # Clean up the temporary SQLite file
+        if os.path.exists(db_path):
+            os.remove(db_path)
+        
+        # Return results
+        return {
+            "status": "report_generated",
+            "code_validation_results": code_validation_results,
+            "zipcode_validation_results": zipcode_validation_results,
+            "final_report": final_report,
+            "report_summary": report_summary
+        }
+        
+    except Exception as e:
+        # Handle errors
+        return {
+            "status": "error",
+            "error_message": str(e)
+        }
