@@ -24,16 +24,13 @@ st.set_page_config(
 # Page title and description
 st.title("Data Validation POC")
 st.write("""
-This application validates data from a Parquet file against rules defined in the Excel file.
-Upload your Parquet file below to get started.
+This application validates data from Parquet files against rules defined in Excel.
+Upload your files below to get started.
 """)
 
-# Create a sidebar for navigation with only two options
+# Create a sidebar for navigation
 st.sidebar.title("Navigation")
-page = st.sidebar.radio("Go to", ["File Upload", "Validation Results"])
-
-# Fixed Excel file path
-EXCEL_FILE_PATH = "data/validation_rules.xlsx"  # Change this to your actual fixed path
+page = st.sidebar.radio("Go to", ["File Upload", "Validation Results", "About"])
 
 # Initialize session state
 if "validation_state" not in st.session_state:
@@ -42,71 +39,95 @@ if "report_df" not in st.session_state:
     st.session_state.report_df = None
 if "excel_data" not in st.session_state:
     st.session_state.excel_data = None
-if "parquet_file_path" not in st.session_state:
-    st.session_state.parquet_file_path = None
+if "parquet_file_paths" not in st.session_state:
+    st.session_state.parquet_file_paths = []
 
 # File Upload page
 if page == "File Upload":
     st.header("File Upload")
     
-    # Load Excel data from fixed path without preview
-    excel_file_path = EXCEL_FILE_PATH
+    # Create two columns for file upload
+    col1, col2 = st.columns(2)
     
-    try:
-        # Check if the Excel file exists
-        if os.path.exists(excel_file_path):
-            # Load Excel data without preview
-            excel_data = load_excel(excel_file_path)
-            st.session_state.excel_data = excel_data
+    with col1:
+        st.subheader("Upload Excel File")
+        uploaded_excel = st.file_uploader("Upload Excel file with validation rules", type=["xlsx", "xls"])
+        
+        if uploaded_excel is not None:
+            # Save the uploaded file to a temporary location
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_file:
+                tmp_file.write(uploaded_excel.getvalue())
+                excel_file_path = tmp_file.name
+            
+            # Store the Excel file path in session state
             st.session_state.excel_file_path = excel_file_path
             
-            # Just display a simple success message
-            st.subheader("Excel File (Fixed Path)")
-            st.success(f"Excel file loaded successfully from: {excel_file_path}")
-        else:
-            st.error(f"Excel file not found at: {excel_file_path}")
-            st.session_state.excel_data = None
-    except Exception as e:
-        st.error(f"Error loading Excel file: {str(e)}")
-        st.session_state.excel_data = None
+            # Load Excel data and preview
+            try:
+                excel_data = load_excel(excel_file_path)
+                st.session_state.excel_data = excel_data
+                
+                # Show preview of Excel sheets
+                st.success(f"Excel file loaded successfully with {len(excel_data)} sheets")
+                
+                # Create tabs for each sheet
+                sheet_tabs = st.tabs(list(excel_data.keys()))
+                
+                for i, (sheet_name, sheet_data) in enumerate(excel_data.items()):
+                    with sheet_tabs[i]:
+                        st.write(f"Preview of '{sheet_name}' sheet:")
+                        st.dataframe(sheet_data.head(5))
+            
+            except Exception as e:
+                st.error(f"Error loading Excel file: {str(e)}")
     
-    # Single Parquet file upload
-    st.subheader("Upload Parquet File")
-    uploaded_parquet = st.file_uploader("Upload Parquet file for validation", type=["parquet"])
-    
-    if uploaded_parquet:
-        # Save the uploaded file to a temporary location
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".parquet") as tmp_file:
-            tmp_file.write(uploaded_parquet.getvalue())
-            parquet_file_path = tmp_file.name
+    with col2:
+        st.subheader("Upload Parquet Files")
+        uploaded_parquets = st.file_uploader("Upload Parquet files for validation", type=["parquet"], accept_multiple_files=True)
         
-        # Store the Parquet file path in session state
-        st.session_state.parquet_file_path = parquet_file_path
-        
-        # Show preview of the Parquet file
-        st.success(f"Parquet file loaded successfully: {uploaded_parquet.name}")
-        
-        try:
-            parquet_data = load_parquet(parquet_file_path)
-            st.write(f"Preview of Parquet data:")
-            st.dataframe(parquet_data.head(5))
-            st.write(f"Columns: {', '.join(parquet_data.columns)}")
-            st.write(f"Rows: {len(parquet_data)}")
-        except Exception as e:
-            st.error(f"Error loading Parquet file: {str(e)}")
+        if uploaded_parquets:
+            # Save the uploaded files to temporary locations
+            parquet_file_paths = []
+            
+            for uploaded_parquet in uploaded_parquets:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".parquet") as tmp_file:
+                    tmp_file.write(uploaded_parquet.getvalue())
+                    parquet_file_path = tmp_file.name
+                    parquet_file_paths.append(parquet_file_path)
+            
+            # Store the Parquet file paths in session state
+            st.session_state.parquet_file_paths = parquet_file_paths
+            
+            # Show preview of each Parquet file
+            st.success(f"{len(parquet_file_paths)} Parquet files loaded successfully")
+            
+            # Create tabs for each Parquet file
+            parquet_tabs = st.tabs([f"Parquet {i+1}" for i in range(len(parquet_file_paths))])
+            
+            for i, file_path in enumerate(parquet_file_paths):
+                with parquet_tabs[i]:
+                    try:
+                        parquet_data = load_parquet(file_path)
+                        st.write(f"Preview of Parquet file {i+1}:")
+                        st.dataframe(parquet_data.head(5))
+                        st.write(f"Columns: {', '.join(parquet_data.columns)}")
+                        st.write(f"Rows: {len(parquet_data)}")
+                    except Exception as e:
+                        st.error(f"Error loading Parquet file {i+1}: {str(e)}")
     
     # Run validation button
-    if st.session_state.excel_data and st.session_state.parquet_file_path:
+    if st.session_state.excel_data and st.session_state.parquet_file_paths:
         if st.button("Run Validation"):
             with st.spinner("Running validation workflow..."):
                 try:
-                    # Run the validation workflow with a list containing the single Parquet file path
+                    # Run the validation workflow
                     st.session_state.validation_state = run_validation_workflow(
                         st.session_state.excel_file_path,
-                        [st.session_state.parquet_file_path]
+                        st.session_state.parquet_file_paths
                     )
                     
                     # Generate the report DataFrame using the static method
+                    # This avoids the need to create a ReportingAgent instance
                     report_df = ReportingAgent.generate_csv_report(st.session_state.validation_state["final_report"])
                     st.session_state.report_df = report_df
                     
@@ -115,10 +136,7 @@ if page == "File Upload":
                 except Exception as e:
                     st.error(f"Error during validation: {str(e)}")
     else:
-        if not st.session_state.excel_data:
-            st.warning("Excel file not loaded. Please check the file path.")
-        if not st.session_state.parquet_file_path:
-            st.info("Please upload a Parquet file to run validation.")
+        st.info("Please upload both Excel and Parquet files to run validation.")
 
 # Validation Results page
 elif page == "Validation Results":
@@ -193,11 +211,53 @@ elif page == "Validation Results":
         else:
             st.info("No report data available.")
 
+# About page
+elif page == "About":
+    st.header("About")
+    st.write("""
+    ## Data Validation POC
+    
+    This application is a Proof of Concept (POC) for data validation using LangChain, LangGraph, and Streamlit.
+    
+    ### Features:
+    
+    1. **File Upload**:
+       - Upload an Excel file with validation rules
+       - Upload one or more Parquet files to validate
+    
+    2. **Validation Workflow**:
+       - Code Validation: Validates codes from the Excel `codes` sheet against Parquet data
+       - Zipcode Validation: Validates zipcodes against the Excel `zipcode` sheet
+    
+    3. **Reporting**:
+       - Generates a downloadable CSV report
+       - Shows detailed validation results
+    
+    ### Technologies Used:
+    
+    - **LangChain**: For building the validation agents and SQL operations
+    - **LangGraph**: For orchestrating the validation workflow
+    - **Streamlit**: For the user interface
+    - **SQLite**: For loading and querying Parquet data
+    - **Groq API**: For LLM-based operations
+    
+    ### How to Use:
+    
+    1. Upload an Excel file with a `codes` sheet and a `zipcode` sheet
+    2. Upload one or more Parquet files to validate
+    3. Run the validation workflow
+    4. View and download the validation report
+    """)
+
 # Clean up temporary files when the app exits
 def cleanup():
     """Clean up temporary files"""
-    if hasattr(st.session_state, 'parquet_file_path') and os.path.exists(st.session_state.parquet_file_path):
-        os.unlink(st.session_state.parquet_file_path)
+    if hasattr(st.session_state, 'excel_file_path') and os.path.exists(st.session_state.excel_file_path):
+        os.unlink(st.session_state.excel_file_path)
+    
+    for file_path in st.session_state.get('parquet_file_paths', []):
+        if os.path.exists(file_path):
+            os.unlink(file_path)
 
 # Register the cleanup function
 import atexit
