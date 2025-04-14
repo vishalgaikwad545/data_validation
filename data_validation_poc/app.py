@@ -33,7 +33,7 @@ st.sidebar.title("Navigation")
 page = st.sidebar.radio("Go to", ["File Upload", "Validation Results"])
 
 # Fixed Excel file path
-EXCEL_FILE_PATH = r"C:\Users\vbgai\Downloads\Langchain\office project\data_validation_poc\validation_rules.xlsx"
+EXCEL_FILE_PATH = "data/validation_rules.xlsx"  # Change this to your actual fixed path
 
 # Initialize session state
 if "validation_state" not in st.session_state:
@@ -61,8 +61,8 @@ if page == "File Upload":
             st.session_state.excel_file_path = excel_file_path
             
             # Just display a simple success message
-            # st.subheader("Excel File (Fixed Path)")
-            # st.success(f"Excel file loaded successfully from: {excel_file_path}")
+            st.subheader("Excel File (Fixed Path)")
+            st.success(f"Excel file loaded successfully from: {excel_file_path}")
         else:
             st.error(f"Excel file not found at: {excel_file_path}")
             st.session_state.excel_data = None
@@ -108,7 +108,11 @@ if page == "File Upload":
                     
                     # Generate the report DataFrame using the static method
                     report_df = ReportingAgent.generate_csv_report(st.session_state.validation_state["final_report"])
-                    st.session_state.report_df = report_df
+                    # Remove the first two columns (source and table) for CSV export
+                    if not report_df.empty and 'source' in report_df.columns and 'table' in report_df.columns:
+                        st.session_state.report_df = report_df.drop(columns=['source', 'table'])
+                    else:
+                        st.session_state.report_df = report_df
                     
                     st.success("Validation completed! Go to 'Validation Results' to see the report.")
                     
@@ -141,39 +145,51 @@ elif page == "Validation Results":
             st.subheader("Summary")
             st.write(st.session_state.validation_state["report_summary"])
         
-        # Show validation results
-        st.subheader("Code Validation Results")
+        # Show column-wise validation results
+        st.subheader("Column Validation Results")
+        
+        # Group code validation results by column
         code_results = st.session_state.validation_state.get("code_validation_results", [])
+        column_validations = {}
         
-        if not code_results:
-            st.info("No code validation matches found.")
+        # Group by column
+        for result in code_results:
+            column_name = result['column']
+            if column_name not in column_validations:
+                column_validations[column_name] = []
+            column_validations[column_name].append(result)
+        
+        if not column_validations:
+            st.info("No column validation issues found.")
         else:
-            st.write(f"Found {len(code_results)} code validation matches.")
+            st.write(f"Found issues in {len(column_validations)} columns.")
             
-            for i, result in enumerate(code_results):
-                with st.expander(f"Match {i+1}: {result['column']} in {result['table']}"):
-                    st.write(f"Column: {result['column']}")
-                    st.write(f"Table: {result['table']}")
-                    st.write(f"Matching values: {', '.join(str(v) for v in result['matching_values'][:5])}{'...' if len(result['matching_values']) > 5 else ''}")
-                    st.write("Sample matching records:")
-                    st.dataframe(pd.DataFrame(result['matching_records'][:5]))
+            # Display column-wise validation results
+            for column_name, results in column_validations.items():
+                with st.expander(f"Column: {column_name} ({len(results)} issues)"):
+                    for i, result in enumerate(results):
+                        st.write(f"**Issue {i+1}:** Invalid code in {result['table']}")
+                        st.write(f"Matching values: {', '.join(str(v) for v in result['matching_values'][:5])}{'...' if len(result['matching_values']) > 5 else ''}")
+                        st.write("Sample data:")
+                        st.dataframe(pd.DataFrame(result['matching_records'][:5]))
+                        st.write("---")
         
+        # Show zipcode validation results with clearer suggestions
         st.subheader("Zipcode Validation Results")
         zipcode_results = st.session_state.validation_state.get("zipcode_validation_results", [])
         
         if not zipcode_results:
-            st.info("No zipcode validation matches found.")
+            st.info("No zipcode validation issues found.")
         else:
-            st.write(f"Found {len(zipcode_results)} zipcode validation matches.")
+            st.write(f"Found {len(zipcode_results)} zipcode validation issues.")
             
             for i, result in enumerate(zipcode_results):
-                with st.expander(f"Match {i+1}: {result['small_zip']} in {result['table']}"):
-                    st.write(f"Table: {result['table']}")
-                    st.write(f"Column: {result['column']}")
-                    st.write(f"Small Zipcode: {result['small_zip']}")
-                    st.write(f"Reporting Zipcode: {result['reporting_zip']}")
-                    st.write(f"Recommendation: {result['recommendation']}")
-                    st.write("Record:")
+                with st.expander(f"Issue {i+1}: Zipcode {result['small_zip']} needs replacement"):
+                    st.write(f"**Column:** {result['column']}")
+                    st.write(f"**Small Zipcode:** {result['small_zip']}")
+                    st.write(f"**Recommended Zipcode:** {result['reporting_zip']}")
+                    st.write(f"**Recommendation:** Replaced original ZIP code {result['small_zip']} with neighboring one ({result['reporting_zip']}) due to low population density.")
+                    st.write("**Sample Record:**")
                     st.json(result['record'])
         
         # Show full report
@@ -181,7 +197,7 @@ elif page == "Validation Results":
         if st.session_state.report_df is not None and not st.session_state.report_df.empty:
             st.dataframe(st.session_state.report_df)
             
-            # Generate CSV for download
+            # Generate CSV for download - use the modified DataFrame without source and table columns
             csv = st.session_state.report_df.to_csv(index=False).encode('utf-8')
             
             st.download_button(
