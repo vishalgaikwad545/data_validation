@@ -1,128 +1,116 @@
 """
-Agent for generating validation reports
+Reporting agent for data validation workflow
 """
-from typing import Dict, List, Any, Callable, Optional
 import pandas as pd
-from langchain.chains import LLMChain
-from langchain.schema import HumanMessage, SystemMessage
-from langchain.prompts import PromptTemplate
-from langchain.tools import BaseTool
-from pydantic import BaseModel, Field
-
-import config
+from typing import Dict, List, Any
 
 class ReportingAgent:
     """
-    Agent that generates validation reports
+    Agent responsible for generating validation reports
     """
-    def __init__(self, llm):
-        """
-        Initialize the reporting agent
-        """
-        self.llm = llm
-        
-        if llm is not None:
-            # Define the system prompt for the report generation
-            self.system_prompt = """
-            You are an expert data analyst helping with generating validation reports.
-            You need to combine the results from code validation and zipcode validation into a comprehensive report.
-            The report should include all matching records, the source of the match, and recommendations.
-            """
-            
-            # Create a prompt template for summarizing the report
-            self.summary_template = PromptTemplate(
-                input_variables=["code_results_count", "zipcode_results_count", "total_records"],
-                template="""
-                Please generate a summary of the validation report.
-                
-                Code Validation Results: {code_results_count} matches found
-                Zipcode Validation Results: {zipcode_results_count} matches found
-                Total Records in Report: {total_records}
-                
-                Please provide a concise summary of the validation results.
-                """
-            )
-            
-            # Create an LLM chain for generating summaries
-            self.summary_chain = LLMChain(
-                llm=llm,
-                prompt=self.summary_template
-            )
     
-    def generate_report(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    def generate_report(self, code_results: List[Dict[str, Any]], zipcode_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Generate a validation report
-        """
-        # Combine code and zipcode validation results
-        code_results = state.get("code_validation_results", [])
-        zipcode_results = state.get("zipcode_validation_results", [])
+        Generate a comprehensive report from validation results
         
-        # Initialize the report data
-        report_data = []
+        Args:
+            code_results: Results from code validation
+            zipcode_results: Results from zipcode validation
+            
+        Returns:
+            Comprehensive report as a list of dictionaries
+        """
+        report = []
         
         # Process code validation results
         for result in code_results:
-            for record in result.get("matching_records", []):
-                report_row = {
-                    "source": "Code Validation",
-                    "table": result["table"],
-                    "column": result["column"],
-                    "matching_value": record.get(result["column"]),
-                    "recommendation": "",
-                    **record
+            for value in result['matching_values']:
+                report_item = {
+                    "source": "code_validation",
+                    "table": result['table'],
+                    "column": result['column'],
+                    "issue_type": "Invalid Code",
+                    "value": value,
+                    "recommendation": f"Update to valid code or remove"
                 }
-                report_data.append(report_row)
-        
+                report.append(report_item)
+                
         # Process zipcode validation results
         for result in zipcode_results:
-            report_row = {
-                "source": "Zipcode Validation",
-                "table": result["table"],
-                "column": result["column"],
-                "matching_value": result["small_zip"],
-                "recommendation": result["recommendation"],
-                **result.get("record", {})
+            report_item = {
+                "source": "zipcode_validation",
+                "table": result['table'],
+                "column": result['column'],
+                "issue_type": "Small Zipcode",
+                "value": result['small_zip'],
+                "recommendation": f"Replaced original ZIP code {result['small_zip']} with neighboring one ({result['reporting_zip']}) due to low population density."
             }
-            report_data.append(report_row)
+            report.append(report_item)
+            
+        return report
         
-        # Generate a summary of the report
-        code_results_count = len(code_results)
-        zipcode_results_count = len(zipcode_results)
-        total_records = len(report_data)
+    def generate_summary(self, code_results: List[Dict[str, Any]], zipcode_results: List[Dict[str, Any]]) -> str:
+        """
+        Generate a text summary of the validation results
         
-        if hasattr(self, 'summary_chain'):
-            summary_result = self.summary_chain.run(
-                code_results_count=code_results_count,
-                zipcode_results_count=zipcode_results_count,
-                total_records=total_records
-            )
+        Args:
+            code_results: Results from code validation
+            zipcode_results: Results from zipcode validation
+            
+        Returns:
+            Summary text
+        """
+        # Count unique tables and columns with issues
+        code_tables = set()
+        code_columns = set()
+        for result in code_results:
+            code_tables.add(result['table'])
+            code_columns.add(f"{result['table']}.{result['column']}")
+            
+        zipcode_tables = set()
+        zipcode_columns = set()
+        for result in zipcode_results:
+            zipcode_tables.add(result['table'])
+            zipcode_columns.add(f"{result['table']}.{result['column']}")
+            
+        # Generate summary text
+        summary = []
+        
+        # Code validation summary
+        code_count = len(code_results)
+        if code_count > 0:
+            summary.append(f"Found {code_count} code validation issues across {len(code_tables)} tables and {len(code_columns)} columns.")
         else:
-            summary_result = f"Validation complete. Found {code_results_count} code matches and {zipcode_results_count} zipcode matches, for a total of {total_records} records."
-        
-        # Update the state
-        state["final_report"] = report_data
-        state["report_summary"] = summary_result
-        state["status"] = "report_generated"
-        
-        return state
+            summary.append("No code validation issues found.")
+            
+        # Zipcode validation summary
+        zipcode_count = len(zipcode_results)
+        if zipcode_count > 0:
+            summary.append(f"Found {zipcode_count} zipcode validation issues across {len(zipcode_tables)} tables and {len(zipcode_columns)} columns.")
+        else:
+            summary.append("No zipcode validation issues found.")
+            
+        # Overall summary
+        total_issues = code_count + zipcode_count
+        if total_issues > 0:
+            summary.append(f"\nTotal: {total_issues} issues requiring attention.")
+        else:
+            summary.append("\nAll data passed validation checks.")
+            
+        return "\n".join(summary)
     
     @staticmethod
     def generate_csv_report(report_data: List[Dict[str, Any]]) -> pd.DataFrame:
         """
-        Generate a CSV report from the validation results
-        Static method that doesn't require an LLM
+        Convert report data to DataFrame for CSV export
+        
+        Args:
+            report_data: Report data as list of dictionaries
+            
+        Returns:
+            DataFrame ready for CSV export
         """
         if not report_data:
             return pd.DataFrame()
-        
-        # Convert to DataFrame
-        df = pd.DataFrame(report_data)
-        
-        # Ensure the important columns come first
-        important_columns = ["source", "table", "column", "matching_value", "recommendation"]
-        other_columns = [col for col in df.columns if col not in important_columns]
-        
-        # Reorder columns
-        df = df[important_columns + other_columns]
-        
-        return df
+            
+        return pd.DataFrame(report_data)
