@@ -12,7 +12,7 @@ from selenium.webdriver.support import expected_conditions as EC
 
 warnings.filterwarnings('ignore')
 
-SAVE_DIR = r'C:\Users\vbgai\Downloads'
+SAVE_DIR = os.getcwd()
 dt = datetime.datetime.now().date()
 excel_name = os.path.join(SAVE_DIR, 'nifty_option_{}_{}.xlsx'.format(dt.day, dt.month))
 
@@ -150,13 +150,15 @@ def scrape_option_chain(driver):
     df = pd.DataFrame(records)
     df = apply_dtypes(df)
 
-    # Try to get NSE timestamp from page
+    # Try to get NSE timestamp from page ("As on DD-Mon-YYYY HH:MM:SS IST")
     refresh_time = excel_time.strftime("%H:%M:%S")
     try:
         ts_el = driver.find_element(By.XPATH,
-            "//*[contains(@id,'time') or contains(@class,'time-stamp') or contains(@class,'timestamp')]")
+            "//*[contains(text(),'As on') or contains(@id,'time') or contains(@class,'time-stamp') or contains(@class,'timestamp')]")
         txt = ts_el.text.strip()
-        if txt:
+        if 'As on' in txt:
+            refresh_time = txt.split('As on')[-1].strip()
+        elif txt:
             refresh_time = txt
     except Exception:
         pass
@@ -204,9 +206,25 @@ def beep_sound(num_beeps=3, frequency=7040, duration=300, pause=0.1):
         time.sleep(pause)
 
 
+def get_last_saved_time(excel_name):
+    """Read the last saved refresh time from existing Excel to avoid duplicates on restart."""
+    if not os.path.isfile(excel_name):
+        return None
+    try:
+        df = pd.read_excel(excel_name, engine='openpyxl', usecols=['Time'])
+        if df.empty:
+            return None
+        last = df['Time'].iloc[-1]
+        return str(last).strip()
+    except Exception:
+        return None
+
+
 def run(excel_name, max_retries=5, max_runtime_minutes=75):
     driver = init_driver()
-    last_time = None
+    last_time = get_last_saved_time(excel_name)
+    if last_time:
+        print(f"[INFO] Resuming — last saved time from Excel: {last_time}")
     retry_count = 0
     start_time = time.time()
 
